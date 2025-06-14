@@ -6,10 +6,26 @@ import os
 from datetime import datetime
 import secrets
 import json
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', secrets.token_hex(16))
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+
+# Configure Socket.IO with proper CORS settings
+socketio = SocketIO(
+    app, 
+    cors_allowed_origins="*", 
+    async_mode='threading',
+    manage_session=False,
+    ping_timeout=60,
+    ping_interval=25,
+    logger=True,
+    engineio_logger=True
+)
 
 # Database setup
 DATABASE = os.environ.get('DATABASE_URL', 'videocall.db')
@@ -198,6 +214,16 @@ def get_active_rooms():
         return jsonify(rooms)
 
 # WebRTC Signaling through Socket.IO
+@socketio.on('connect')
+def on_connect():
+    """Handle client connection"""
+    logger.info(f"Client connected: {request.sid}")
+
+@socketio.on('disconnect')
+def on_disconnect():
+    """Handle client disconnection"""
+    logger.info(f"Client disconnected: {request.sid}")
+
 @socketio.on('join_room')
 def on_join_room(data):
     """Handle user joining a room"""
@@ -206,17 +232,21 @@ def on_join_room(data):
     user_id = data.get('user_id') or session.get('user_id')
     
     if not username or not user_id:
+        logger.error(f"Missing username or user_id in join_room: {data}")
         return
     
-    print(f"User {username} (ID: {user_id}) joining room {room_id}")
+    logger.info(f"User {username} (ID: {user_id}) joining room {room_id}")
     join_room(room_id)
     
     # Record participant joining
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO room_participants (room_id, user_id) VALUES (?, ?)
-        ''', (room_id, user_id))
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO room_participants (room_id, user_id) VALUES (?, ?)
+            ''', (room_id, user_id))
+    except Exception as e:
+        logger.error(f"Error recording participant: {str(e)}")
     
     # Notify others
     emit('user_joined', {
@@ -225,9 +255,12 @@ def on_join_room(data):
     }, room=room_id, include_self=False)
     
     # Send current participants to the new user
-    participants = get_room_participants(room_id)
-    print(f"Current participants in room {room_id}: {participants}")
-    emit('room_users', participants)
+    try:
+        participants = get_room_participants(room_id)
+        logger.info(f"Current participants in room {room_id}: {participants}")
+        emit('room_users', participants)
+    except Exception as e:
+        logger.error(f"Error getting room participants: {str(e)}")
 
 @socketio.on('leave_room')
 def on_leave_room(data):
@@ -237,18 +270,23 @@ def on_leave_room(data):
     user_id = session.get('user_id')
     
     if not username or not user_id:
+        logger.error(f"Missing username or user_id in leave_room")
         return
     
+    logger.info(f"User {username} (ID: {user_id}) leaving room {room_id}")
     leave_room(room_id)
     
     # Update participant record
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            UPDATE room_participants 
-            SET left_at = CURRENT_TIMESTAMP 
-            WHERE room_id = ? AND user_id = ? AND left_at IS NULL
-        ''', (room_id, user_id))
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE room_participants 
+                SET left_at = CURRENT_TIMESTAMP 
+                WHERE room_id = ? AND user_id = ? AND left_at IS NULL
+            ''', (room_id, user_id))
+    except Exception as e:
+        logger.error(f"Error updating participant record: {str(e)}")
     
     # Notify others
     emit('user_left', {
@@ -263,15 +301,15 @@ def handle_offer(data):
     from_user = data.get('from_user')
     room_id = data.get('room_id')
     
-    print(f"Received offer from {from_user} to {target_user} in room {room_id}")
+    logger.info(f"Received offer from {from_user} to {target_user} in room {room_id}")
     
     if target_user and from_user and room_id:
-        # Send to specific user
+        # Send to entire room (each client will filter by target_user)
         emit('webrtc_offer', {
             'offer': data['offer'],
             'from_user': from_user,
             'target_user': target_user
-        }, room=room_id)
+        }, broadcast=True, room=room_id)
 
 @socketio.on('webrtc_answer')
 def handle_answer(data):
@@ -280,15 +318,15 @@ def handle_answer(data):
     from_user = data.get('from_user')
     room_id = data.get('room_id')
     
-    print(f"Received answer from {from_user} to {target_user} in room {room_id}")
+    logger.info(f"Received answer from {from_user} to {target_user} in room {room_id}")
     
     if target_user and from_user and room_id:
-        # Send to specific user
+        # Send to entire room (each client will filter by target_user)
         emit('webrtc_answer', {
             'answer': data['answer'],
             'from_user': from_user,
             'target_user': target_user
-        }, room=room_id)
+        }, broadcast=True, room=room_id)
 
 @socketio.on('webrtc_ice_candidate')
 def handle_ice_candidate(data):
@@ -297,15 +335,15 @@ def handle_ice_candidate(data):
     from_user = data.get('from_user')
     room_id = data.get('room_id')
     
-    print(f"Received ICE candidate from {from_user} to {target_user} in room {room_id}")
+    logger.info(f"Received ICE candidate from {from_user} to {target_user} in room {room_id}")
     
     if target_user and from_user and room_id:
-        # Send to specific user
+        # Send to entire room (each client will filter by target_user)
         emit('webrtc_ice_candidate', {
             'candidate': data['candidate'],
             'from_user': from_user,
             'target_user': target_user
-        }, room=room_id)
+        }, broadcast=True, room=room_id)
 
 def get_room_participants(room_id):
     """Get list of current room participants"""
