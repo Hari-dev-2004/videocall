@@ -235,12 +235,12 @@ class VideoCallApp {
         this.isScreenSharing = false;
         this.roomId = '{{ room_id }}';
         this.username = '{{ username }}';
+        this.userId = '{{ session.user_id }}';
         
         this.initializeElements();
         this.setupEventListeners();
         this.initializeMedia();
         this.setupSocketEvents();
-        this.joinRoom();
     }
 
     initializeElements() {
@@ -278,7 +278,10 @@ class VideoCallApp {
             });
             
             this.localVideo.srcObject = this.localStream;
-            this.updateConnectionStatus('Connected', 'connected');
+            this.updateConnectionStatus('Connected to room', 'connected');
+            
+            // Join room after media is initialized
+            this.joinRoom();
         } catch (error) {
             console.error('Error accessing media devices:', error);
             this.updateConnectionStatus('Media access denied', 'disconnected');
@@ -291,9 +294,12 @@ class VideoCallApp {
             console.log('Connected to server');
         });
 
-        this.socket.on('user_joined', (data) => {
-            console.log('User joined:', data.username);
+        this.socket.on('user_joined', async (data) => {
+            console.log('User joined:', data.username, data.user_id);
             this.addParticipant(data.username, data.user_id);
+            
+            // Initiate WebRTC connection to the new user
+            await this.initiateCall(data.user_id);
         });
 
         this.socket.on('user_left', (data) => {
@@ -301,20 +307,31 @@ class VideoCallApp {
             this.removeParticipant(data.user_id);
         });
 
-        this.socket.on('room_users', (users) => {
+        this.socket.on('room_users', async (users) => {
+            console.log('Room users:', users);
             this.updateParticipantsList(users);
+            
+            // Create connections with all existing users
+            for (const user of users) {
+                if (user.user_id != this.userId && !this.peerConnections.has(user.user_id)) {
+                    await this.initiateCall(user.user_id);
+                }
+            }
         });
 
         // WebRTC signaling
         this.socket.on('webrtc_offer', async (data) => {
+            console.log('Received offer from:', data.from_user);
             await this.handleOffer(data);
         });
 
         this.socket.on('webrtc_answer', async (data) => {
+            console.log('Received answer from:', data.from_user);
             await this.handleAnswer(data);
         });
 
         this.socket.on('webrtc_ice_candidate', async (data) => {
+            console.log('Received ICE candidate from:', data.from_user);
             await this.handleIceCandidate(data);
         });
     }
@@ -325,16 +342,44 @@ class VideoCallApp {
             username: this.username
         });
     }
+    
+    async initiateCall(userId) {
+        console.log('Initiating call to user:', userId);
+        try {
+            const peerConnection = await this.createPeerConnection(userId);
+            
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+            
+            this.socket.emit('webrtc_offer', {
+                room_id: this.roomId,
+                offer: offer,
+                target_user: userId,
+                from_user: this.userId
+            });
+        } catch (error) {
+            console.error('Error initiating call:', error);
+        }
+    }
 
     async createPeerConnection(userId) {
+        // Check if connection already exists
+        if (this.peerConnections.has(userId)) {
+            return this.peerConnections.get(userId);
+        }
+        
         const configuration = {
             iceServers: [
                 { urls: 'stun:stun.l.google.com:19302' },
-                { urls: 'stun:stun1.l.google.com:19302' }
+                { urls: 'stun:stun1.l.google.com:19302' },
+                { urls: 'stun:stun2.l.google.com:19302' },
+                { urls: 'stun:stun3.l.google.com:19302' },
+                { urls: 'stun:stun4.l.google.com:19302' }
             ]
         };
 
         const peerConnection = new RTCPeerConnection(configuration);
+        console.log('Created peer connection for user:', userId);
 
         // Add local stream
         if (this.localStream) {
@@ -345,17 +390,31 @@ class VideoCallApp {
 
         // Handle remote stream
         peerConnection.ontrack = (event) => {
+            console.log('Received remote track from user:', userId);
             this.handleRemoteStream(event.streams[0], userId);
         };
 
         // Handle ICE candidates
         peerConnection.onicecandidate = (event) => {
             if (event.candidate) {
+                console.log('Sending ICE candidate to user:', userId);
                 this.socket.emit('webrtc_ice_candidate', {
                     room_id: this.roomId,
                     candidate: event.candidate,
-                    target_user: userId
+                    target_user: userId,
+                    from_user: this.userId
                 });
+            }
+        };
+        
+        // Connection state monitoring
+        peerConnection.oniceconnectionstatechange = () => {
+            console.log(`ICE connection state with ${userId}: ${peerConnection.iceConnectionState}`);
+            if (peerConnection.iceConnectionState === 'failed' || 
+                peerConnection.iceConnectionState === 'disconnected') {
+                // Try reconnecting
+                console.log('Connection failed, attempting to reconnect...');
+                this.initiateCall(userId);
             }
         };
 
@@ -364,34 +423,67 @@ class VideoCallApp {
     }
 
     async handleOffer(data) {
-        const peerConnection = await this.createPeerConnection(data.from_user);
-        
-        await peerConnection.setRemoteDescription(data.offer);
-        const answer = await peerConnection.createAnswer();
-        await peerConnection.setLocalDescription(answer);
+        console.log('Handling offer from user:', data.from_user);
+        try {
+            const peerConnection = await this.createPeerConnection(data.from_user);
+            
+            if (peerConnection.signalingState !== 'stable') {
+                console.log('Signaling state not stable, ignoring offer');
+                return;
+            }
+            
+            await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
+            const answer = await peerConnection.createAnswer();
+            await peerConnection.setLocalDescription(answer);
 
-        this.socket.emit('webrtc_answer', {
-            room_id: this.roomId,
-            answer: answer,
-            target_user: data.from_user
-        });
+            this.socket.emit('webrtc_answer', {
+                room_id: this.roomId,
+                answer: answer,
+                target_user: data.from_user,
+                from_user: this.userId
+            });
+        } catch (error) {
+            console.error('Error handling offer:', error);
+        }
     }
 
     async handleAnswer(data) {
-        const peerConnection = this.peerConnections.get(data.from_user);
-        if (peerConnection) {
-            await peerConnection.setRemoteDescription(data.answer);
+        console.log('Handling answer from user:', data.from_user);
+        try {
+            const peerConnection = this.peerConnections.get(data.from_user);
+            if (peerConnection) {
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
+            }
+        } catch (error) {
+            console.error('Error handling answer:', error);
         }
     }
 
     async handleIceCandidate(data) {
-        const peerConnection = this.peerConnections.get(data.from_user);
-        if (peerConnection) {
-            await peerConnection.addIceCandidate(data.candidate);
+        console.log('Handling ICE candidate from user:', data.from_user);
+        try {
+            const peerConnection = this.peerConnections.get(data.from_user);
+            if (peerConnection) {
+                await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+            }
+        } catch (error) {
+            console.error('Error handling ICE candidate:', error);
         }
     }
 
     handleRemoteStream(stream, userId) {
+        console.log('Handling remote stream from user:', userId);
+        
+        // Check if video element already exists for this user
+        const existingVideo = document.getElementById(`video-${userId}`);
+        if (existingVideo) {
+            const videoElement = existingVideo.querySelector('video');
+            if (videoElement) {
+                videoElement.srcObject = stream;
+                return;
+            }
+        }
+        
         // Create video element for remote user
         const videoWrapper = document.createElement('div');
         videoWrapper.className = 'video-wrapper';
@@ -403,9 +495,16 @@ class VideoCallApp {
         video.playsinline = true;
         video.srcObject = stream;
 
+        // Get username for this user ID
+        let username = 'User ' + userId;
+        const participantElement = document.getElementById(`participant-${userId}`);
+        if (participantElement) {
+            username = participantElement.textContent.trim();
+        }
+
         const overlay = document.createElement('div');
         overlay.className = 'video-overlay';
-        overlay.textContent = `User ${userId}`;
+        overlay.textContent = username;
 
         videoWrapper.appendChild(video);
         videoWrapper.appendChild(overlay);
@@ -436,6 +535,20 @@ class VideoCallApp {
                 this.videoToggle.className = this.isVideoEnabled ? 
                     'control-btn video-on' : 'control-btn video-off';
                 this.videoToggle.textContent = this.isVideoEnabled ? '📹' : '📹';
+            }
+        }
+    }
+
+    toggleAudio() {
+        if (this.localStream) {
+            const audioTrack = this.localStream.getAudioTracks()[0];
+            if (audioTrack) {
+                audioTrack.enabled = !audioTrack.enabled;
+                this.isAudioEnabled = audioTrack.enabled;
+                
+                this.audioToggle.className = this.isAudioEnabled ? 
+                    'control-btn audio-on' : 'control-btn audio-off';
+                this.audioToggle.textContent = this.isAudioEnabled ? '🎤' : '🔇';
             }
         }
     }
@@ -501,6 +614,11 @@ class VideoCallApp {
     }
 
     addParticipant(username, userId) {
+        // Check if participant already exists
+        if (document.getElementById(`participant-${userId}`)) {
+            return;
+        }
+        
         const participant = document.createElement('div');
         participant.className = 'participant';
         participant.id = `participant-${userId}`;
@@ -539,7 +657,7 @@ class VideoCallApp {
 
         // Add current users
         users.forEach(user => {
-            if (user.username !== this.username) {
+            if (user.user_id != this.userId) {
                 this.addParticipant(user.username, user.user_id);
             }
         });
@@ -587,14 +705,3 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 </script>
 {% endblock %}
-
-    toggleAudio() {
-        if (this.localStream) {
-            const audioTrack = this.localStream.getAudioTracks()[0];
-            if (audioTrack) {
-                audioTrack.enabled = !audioTrack.enabled;
-                this.isAudioEnabled = audioTrack.enabled;
-                
-                this.audioToggle.className = this.isAudioEnabled ? 
-                    'control-btn audio-on' : 'control-btn audio-off';
-                this.audioToggle.textContent = this.isAudioEnabled ? '🎤' : '🔇';

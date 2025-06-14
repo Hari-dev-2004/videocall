@@ -255,17 +255,44 @@ def on_leave_room(data):
 @socketio.on('webrtc_offer')
 def handle_offer(data):
     """Handle WebRTC offer"""
-    emit('webrtc_offer', data, room=data['room_id'], include_self=False)
+    target_user = data.get('target_user')
+    if target_user:
+        # Send to specific user
+        room_id = data['room_id']
+        from_user = data.get('from_user')
+        emit('webrtc_offer', {
+            'offer': data['offer'],
+            'from_user': from_user,
+            'target_user': target_user
+        }, room=room_id, include_self=False)
 
 @socketio.on('webrtc_answer')
 def handle_answer(data):
     """Handle WebRTC answer"""
-    emit('webrtc_answer', data, room=data['room_id'], include_self=False)
+    target_user = data.get('target_user')
+    if target_user:
+        # Send to specific user
+        room_id = data['room_id']
+        from_user = data.get('from_user')
+        emit('webrtc_answer', {
+            'answer': data['answer'],
+            'from_user': from_user,
+            'target_user': target_user
+        }, room=room_id, include_self=False)
 
 @socketio.on('webrtc_ice_candidate')
 def handle_ice_candidate(data):
     """Handle ICE candidate"""
-    emit('webrtc_ice_candidate', data, room=data['room_id'], include_self=False)
+    target_user = data.get('target_user')
+    if target_user:
+        # Send to specific user
+        room_id = data['room_id']
+        from_user = data.get('from_user')
+        emit('webrtc_ice_candidate', {
+            'candidate': data['candidate'],
+            'from_user': from_user,
+            'target_user': target_user
+        }, room=room_id, include_self=False)
 
 def get_room_participants(room_id):
     """Get list of current room participants"""
