@@ -177,6 +177,7 @@
     <h2>🎥 {{ room_name }}</h2>
     <p><strong>Room ID:</strong> {{ room_id }}</p>
     <p><strong>Your Name:</strong> {{ username }}</p>
+    <p><strong>Your User ID:</strong> <span id="myUserId">{{ session.user_id }}</span></p>
     <div class="participants-list" id="participantsList">
         <div class="participant">
             <span class="status-indicator status-online"></span>
@@ -227,7 +228,7 @@
 <script>
 class VideoCallApp {
     constructor() {
-        this.socket = io();
+        this.socket = null;
         this.localStream = null;
         this.peerConnections = new Map();
         this.isVideoEnabled = true;
@@ -235,14 +236,14 @@ class VideoCallApp {
         this.isScreenSharing = false;
         this.roomId = '{{ room_id }}';
         this.username = '{{ username }}';
-        this.userId = {{ session.user_id }};
+        this.userId = parseInt('{{ session.user_id }}');
         
         console.log("My user ID:", this.userId);
         
         this.initializeElements();
         this.setupEventListeners();
+        this.connectSocket();
         this.initializeMedia();
-        this.setupSocketEvents();
     }
 
     initializeElements() {
@@ -267,11 +268,28 @@ class VideoCallApp {
             this.leave();
         });
     }
+    
+    connectSocket() {
+        // Initialize Socket.IO with reconnection settings
+        this.socket = io({
+            reconnection: true,
+            reconnectionAttempts: 5,
+            reconnectionDelay: 1000,
+            reconnectionDelayMax: 5000,
+            timeout: 20000
+        });
+        
+        this.setupSocketEvents();
+    }
 
     async initializeMedia() {
         try {
             this.localStream = await navigator.mediaDevices.getUserMedia({
-                video: { width: 1280, height: 720 },
+                video: { 
+                    width: { ideal: 1280 },
+                    height: { ideal: 720 },
+                    facingMode: "user"
+                },
                 audio: {
                     echoCancellation: true,
                     noiseSuppression: true,
@@ -286,14 +304,25 @@ class VideoCallApp {
             this.joinRoom();
         } catch (error) {
             console.error('Error accessing media devices:', error);
-            this.updateConnectionStatus('Media access denied', 'disconnected');
+            this.updateConnectionStatus('Media access denied: ' + error.message, 'disconnected');
             alert('Please allow camera and microphone access to use the video call.');
         }
     }
 
     setupSocketEvents() {
         this.socket.on('connect', () => {
-            console.log('Connected to server');
+            console.log('Connected to server with socket ID:', this.socket.id);
+            this.updateConnectionStatus('Connected to server', 'connecting');
+            
+            // If we already have media, join the room
+            if (this.localStream) {
+                this.joinRoom();
+            }
+        });
+        
+        this.socket.on('connect_error', (error) => {
+            console.error('Connection error:', error);
+            this.updateConnectionStatus('Connection error: ' + error.message, 'disconnected');
         });
 
         this.socket.on('user_joined', async (data) => {
@@ -301,7 +330,7 @@ class VideoCallApp {
             this.addParticipant(data.username, data.user_id);
             
             // Initiate WebRTC connection to the new user
-            await this.initiateCall(data.user_id);
+            await this.initiateCall(parseInt(data.user_id));
         });
 
         this.socket.on('user_left', (data) => {
@@ -315,9 +344,9 @@ class VideoCallApp {
             
             // Create connections with all existing users
             for (const user of users) {
-                if (user.user_id != this.userId && !this.peerConnections.has(user.user_id)) {
+                if (parseInt(user.user_id) !== this.userId && !this.peerConnections.has(parseInt(user.user_id))) {
                     console.log("Initiating call to existing user:", user.user_id);
-                    await this.initiateCall(user.user_id);
+                    await this.initiateCall(parseInt(user.user_id));
                 }
             }
         });
@@ -327,7 +356,7 @@ class VideoCallApp {
             console.log('Received offer from:', data.from_user, 'for:', data.target_user);
             
             // Only process if this offer is for me
-            if (data.target_user == this.userId) {
+            if (parseInt(data.target_user) === this.userId) {
                 await this.handleOffer(data);
             }
         });
@@ -336,7 +365,7 @@ class VideoCallApp {
             console.log('Received answer from:', data.from_user, 'for:', data.target_user);
             
             // Only process if this answer is for me
-            if (data.target_user == this.userId) {
+            if (parseInt(data.target_user) === this.userId) {
                 await this.handleAnswer(data);
             }
         });
@@ -345,13 +374,23 @@ class VideoCallApp {
             console.log('Received ICE candidate from:', data.from_user, 'for:', data.target_user);
             
             // Only process if this ICE candidate is for me
-            if (data.target_user == this.userId) {
+            if (parseInt(data.target_user) === this.userId) {
                 await this.handleIceCandidate(data);
             }
+        });
+        
+        this.socket.on('disconnect', () => {
+            console.log('Disconnected from server');
+            this.updateConnectionStatus('Disconnected from server', 'disconnected');
         });
     }
 
     joinRoom() {
+        if (!this.socket || !this.socket.connected) {
+            console.error('Socket not connected, cannot join room');
+            return;
+        }
+        
         console.log("Joining room:", this.roomId, "as user:", this.userId);
         this.socket.emit('join_room', {
             room_id: this.roomId,
@@ -395,8 +434,14 @@ class VideoCallApp {
                 { urls: 'stun:stun1.l.google.com:19302' },
                 { urls: 'stun:stun2.l.google.com:19302' },
                 { urls: 'stun:stun3.l.google.com:19302' },
-                { urls: 'stun:stun4.l.google.com:19302' }
-            ]
+                { urls: 'stun:stun4.l.google.com:19302' },
+                {
+                    urls: 'turn:numb.viagenie.ca',
+                    credential: 'muazkh',
+                    username: 'webrtc@live.com'
+                }
+            ],
+            iceCandidatePoolSize: 10
         };
 
         const peerConnection = new RTCPeerConnection(configuration);
@@ -405,13 +450,16 @@ class VideoCallApp {
         // Add local stream
         if (this.localStream) {
             this.localStream.getTracks().forEach(track => {
+                console.log('Adding track to peer connection:', track.kind);
                 peerConnection.addTrack(track, this.localStream);
             });
+        } else {
+            console.error('No local stream available when creating peer connection');
         }
 
         // Handle remote stream
         peerConnection.ontrack = (event) => {
-            console.log('Received remote track from user:', userId);
+            console.log('Received remote track from user:', userId, event.streams[0]);
             this.handleRemoteStream(event.streams[0], userId);
         };
 
@@ -431,11 +479,36 @@ class VideoCallApp {
         // Connection state monitoring
         peerConnection.oniceconnectionstatechange = () => {
             console.log(`ICE connection state with ${userId}: ${peerConnection.iceConnectionState}`);
-            if (peerConnection.iceConnectionState === 'failed' || 
+            
+            if (peerConnection.iceConnectionState === 'connected' || 
+                peerConnection.iceConnectionState === 'completed') {
+                console.log(`Connection established with user ${userId}`);
+            }
+            else if (peerConnection.iceConnectionState === 'failed' || 
                 peerConnection.iceConnectionState === 'disconnected') {
                 // Try reconnecting
                 console.log('Connection failed, attempting to reconnect...');
-                this.initiateCall(userId);
+                setTimeout(() => {
+                    this.initiateCall(userId);
+                }, 2000);
+            }
+        };
+        
+        // Negotiation needed
+        peerConnection.onnegotiationneeded = async () => {
+            console.log('Negotiation needed with user:', userId);
+            try {
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+                
+                this.socket.emit('webrtc_offer', {
+                    room_id: this.roomId,
+                    offer: offer,
+                    target_user: userId,
+                    from_user: this.userId
+                });
+            } catch (error) {
+                console.error('Error during negotiation:', error);
             }
         };
 
@@ -446,24 +519,25 @@ class VideoCallApp {
     async handleOffer(data) {
         console.log('Handling offer from user:', data.from_user);
         try {
-            const peerConnection = await this.createPeerConnection(data.from_user);
+            const fromUserId = parseInt(data.from_user);
+            const peerConnection = await this.createPeerConnection(fromUserId);
             
-            if (peerConnection.signalingState !== 'stable') {
-                console.log('Signaling state not stable, ignoring offer');
-                return;
-            }
-            
-            await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
-            const answer = await peerConnection.createAnswer();
-            await peerConnection.setLocalDescription(answer);
+            if (peerConnection.signalingState === 'stable') {
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
+                
+                const answer = await peerConnection.createAnswer();
+                await peerConnection.setLocalDescription(answer);
 
-            console.log("Sending answer to:", data.from_user, "from:", this.userId);
-            this.socket.emit('webrtc_answer', {
-                room_id: this.roomId,
-                answer: answer,
-                target_user: data.from_user,
-                from_user: this.userId
-            });
+                console.log("Sending answer to:", fromUserId, "from:", this.userId);
+                this.socket.emit('webrtc_answer', {
+                    room_id: this.roomId,
+                    answer: answer,
+                    target_user: fromUserId,
+                    from_user: this.userId
+                });
+            } else {
+                console.log('Ignoring offer in non-stable state:', peerConnection.signalingState);
+            }
         } catch (error) {
             console.error('Error handling offer:', error);
         }
@@ -472,9 +546,13 @@ class VideoCallApp {
     async handleAnswer(data) {
         console.log('Handling answer from user:', data.from_user);
         try {
-            const peerConnection = this.peerConnections.get(data.from_user);
+            const fromUserId = parseInt(data.from_user);
+            const peerConnection = this.peerConnections.get(fromUserId);
             if (peerConnection) {
                 await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
+                console.log('Successfully set remote description from answer');
+            } else {
+                console.error('No peer connection found for user:', fromUserId);
             }
         } catch (error) {
             console.error('Error handling answer:', error);
@@ -484,9 +562,13 @@ class VideoCallApp {
     async handleIceCandidate(data) {
         console.log('Handling ICE candidate from user:', data.from_user);
         try {
-            const peerConnection = this.peerConnections.get(data.from_user);
+            const fromUserId = parseInt(data.from_user);
+            const peerConnection = this.peerConnections.get(fromUserId);
             if (peerConnection) {
                 await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+                console.log('Successfully added ICE candidate');
+            } else {
+                console.error('No peer connection found for user:', fromUserId);
             }
         } catch (error) {
             console.error('Error handling ICE candidate:', error);
@@ -502,6 +584,7 @@ class VideoCallApp {
             const videoElement = existingVideo.querySelector('video');
             if (videoElement) {
                 videoElement.srcObject = stream;
+                console.log('Updated existing video element with new stream');
                 return;
             }
         }
@@ -516,6 +599,16 @@ class VideoCallApp {
         video.autoplay = true;
         video.playsinline = true;
         video.srcObject = stream;
+        
+        // Add event listeners to log when video starts playing
+        video.onloadedmetadata = () => {
+            console.log(`Remote video metadata loaded for user ${userId}`);
+            video.play().catch(e => console.error('Error playing remote video:', e));
+        };
+        
+        video.onplaying = () => {
+            console.log(`Remote video is now playing for user ${userId}`);
+        };
 
         // Get username for this user ID
         let username = 'User ' + userId;
@@ -557,6 +650,8 @@ class VideoCallApp {
                 this.videoToggle.className = this.isVideoEnabled ? 
                     'control-btn video-on' : 'control-btn video-off';
                 this.videoToggle.textContent = this.isVideoEnabled ? '📹' : '📹';
+                
+                console.log('Video track enabled:', this.isVideoEnabled);
             }
         }
     }
@@ -571,6 +666,8 @@ class VideoCallApp {
                 this.audioToggle.className = this.isAudioEnabled ? 
                     'control-btn audio-on' : 'control-btn audio-off';
                 this.audioToggle.textContent = this.isAudioEnabled ? '🎤' : '🔇';
+                
+                console.log('Audio track enabled:', this.isAudioEnabled);
             }
         }
     }
@@ -592,6 +689,7 @@ class VideoCallApp {
                     );
                     if (sender) {
                         await sender.replaceTrack(videoTrack);
+                        console.log('Replaced video track with screen share');
                     }
                 });
 
@@ -624,6 +722,7 @@ class VideoCallApp {
                 );
                 if (sender && videoTrack) {
                     await sender.replaceTrack(videoTrack);
+                    console.log('Replaced screen share with camera');
                 }
             });
 
@@ -649,12 +748,15 @@ class VideoCallApp {
             ${username}
         `;
         this.participantsList.appendChild(participant);
+        
+        console.log(`Participant added: ${username} (${userId})`);
     }
 
     removeParticipant(userId) {
         const participant = document.getElementById(`participant-${userId}`);
         if (participant) {
             participant.remove();
+            console.log(`Participant removed: ${userId}`);
         }
 
         // Remove video element
@@ -662,13 +764,15 @@ class VideoCallApp {
         if (videoElement) {
             videoElement.remove();
             this.updateVideoLayout();
+            console.log(`Video element removed for user: ${userId}`);
         }
 
         // Close peer connection
-        const peerConnection = this.peerConnections.get(userId);
+        const peerConnection = this.peerConnections.get(parseInt(userId));
         if (peerConnection) {
             peerConnection.close();
-            this.peerConnections.delete(userId);
+            this.peerConnections.delete(parseInt(userId));
+            console.log(`Peer connection closed for user: ${userId}`);
         }
     }
 
@@ -679,32 +783,43 @@ class VideoCallApp {
 
         // Add current users
         users.forEach(user => {
-            if (user.user_id != this.userId) {
+            if (parseInt(user.user_id) !== this.userId) {
                 this.addParticipant(user.username, user.user_id);
             }
         });
+        
+        console.log(`Participants list updated with ${users.length} users`);
     }
 
     updateConnectionStatus(message, status) {
         this.connectionStatus.textContent = message;
         this.connectionStatus.className = `connection-status status-${status}`;
+        console.log(`Connection status: ${message} (${status})`);
     }
 
     leave() {
         // Clean up streams
         if (this.localStream) {
-            this.localStream.getTracks().forEach(track => track.stop());
+            this.localStream.getTracks().forEach(track => {
+                track.stop();
+                console.log(`Stopped ${track.kind} track`);
+            });
         }
 
         // Close all peer connections
-        this.peerConnections.forEach(peerConnection => {
+        this.peerConnections.forEach((peerConnection, userId) => {
             peerConnection.close();
+            console.log(`Closed peer connection with user: ${userId}`);
         });
+        this.peerConnections.clear();
 
         // Leave room
-        this.socket.emit('leave_room', {
-            room_id: this.roomId
-        });
+        if (this.socket && this.socket.connected) {
+            this.socket.emit('leave_room', {
+                room_id: this.roomId
+            });
+            console.log(`Left room: ${this.roomId}`);
+        }
 
         // Redirect to home
         window.location.href = '/';
@@ -726,4 +841,4 @@ document.addEventListener('DOMContentLoaded', function() {
     new VideoCallApp();
 });
 </script>
-{% endblock %}
+{% endblock %} 
