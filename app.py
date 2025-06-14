@@ -1,5 +1,6 @@
 from flask import Flask, render_template, request, jsonify, session, redirect, url_for, flash
 from flask_socketio import SocketIO, emit, join_room, leave_room
+from flask_cors import CORS
 import sqlite3
 import uuid
 import os
@@ -14,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', secrets.token_hex(16))
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 # Configure Socket.IO with proper CORS settings
 socketio = SocketIO(
@@ -21,10 +23,11 @@ socketio = SocketIO(
     cors_allowed_origins="*", 
     async_mode='threading',
     manage_session=False,
-    ping_timeout=60,
-    ping_interval=25,
+    ping_timeout=120,
+    ping_interval=10,
     logger=True,
-    engineio_logger=True
+    engineio_logger=True,
+    always_connect=True
 )
 
 # Database setup
@@ -218,6 +221,7 @@ def get_active_rooms():
 def on_connect():
     """Handle client connection"""
     logger.info(f"Client connected: {request.sid}")
+    emit('connection_success', {'message': 'Connected successfully'})
 
 @socketio.on('disconnect')
 def on_disconnect():

@@ -273,10 +273,11 @@ class VideoCallApp {
         // Initialize Socket.IO with reconnection settings
         this.socket = io({
             reconnection: true,
-            reconnectionAttempts: 5,
+            reconnectionAttempts: 10,
             reconnectionDelay: 1000,
             reconnectionDelayMax: 5000,
-            timeout: 20000
+            timeout: 60000,
+            transports: ['websocket', 'polling']
         });
         
         this.setupSocketEvents();
@@ -320,9 +321,21 @@ class VideoCallApp {
             }
         });
         
+        this.socket.on('connection_success', (data) => {
+            console.log('Connection success:', data);
+            this.updateConnectionStatus('Connected to server successfully', 'connected');
+        });
+        
         this.socket.on('connect_error', (error) => {
             console.error('Connection error:', error);
             this.updateConnectionStatus('Connection error: ' + error.message, 'disconnected');
+            
+            // Try to reconnect with polling if websocket fails
+            if (this.socket.io.opts.transports.indexOf('polling') === -1) {
+                console.log('Trying to reconnect with polling transport');
+                this.socket.io.opts.transports = ['polling', 'websocket'];
+                this.socket.connect();
+            }
         });
 
         this.socket.on('user_joined', async (data) => {
