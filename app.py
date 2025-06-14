@@ -5,6 +5,7 @@ import uuid
 import os
 from datetime import datetime
 import secrets
+import json
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', secrets.token_hex(16))
@@ -201,12 +202,13 @@ def get_active_rooms():
 def on_join_room(data):
     """Handle user joining a room"""
     room_id = data['room_id']
-    username = session.get('username')
-    user_id = session.get('user_id')
+    username = data.get('username') or session.get('username')
+    user_id = data.get('user_id') or session.get('user_id')
     
     if not username or not user_id:
         return
     
+    print(f"User {username} (ID: {user_id}) joining room {room_id}")
     join_room(room_id)
     
     # Record participant joining
@@ -223,7 +225,9 @@ def on_join_room(data):
     }, room=room_id, include_self=False)
     
     # Send current participants to the new user
-    emit('room_users', get_room_participants(room_id))
+    participants = get_room_participants(room_id)
+    print(f"Current participants in room {room_id}: {participants}")
+    emit('room_users', participants)
 
 @socketio.on('leave_room')
 def on_leave_room(data):
@@ -256,56 +260,65 @@ def on_leave_room(data):
 def handle_offer(data):
     """Handle WebRTC offer"""
     target_user = data.get('target_user')
-    if target_user:
+    from_user = data.get('from_user')
+    room_id = data.get('room_id')
+    
+    print(f"Received offer from {from_user} to {target_user} in room {room_id}")
+    
+    if target_user and from_user and room_id:
         # Send to specific user
-        room_id = data['room_id']
-        from_user = data.get('from_user')
         emit('webrtc_offer', {
             'offer': data['offer'],
             'from_user': from_user,
             'target_user': target_user
-        }, room=room_id, include_self=False)
+        }, room=room_id)
 
 @socketio.on('webrtc_answer')
 def handle_answer(data):
     """Handle WebRTC answer"""
     target_user = data.get('target_user')
-    if target_user:
+    from_user = data.get('from_user')
+    room_id = data.get('room_id')
+    
+    print(f"Received answer from {from_user} to {target_user} in room {room_id}")
+    
+    if target_user and from_user and room_id:
         # Send to specific user
-        room_id = data['room_id']
-        from_user = data.get('from_user')
         emit('webrtc_answer', {
             'answer': data['answer'],
             'from_user': from_user,
             'target_user': target_user
-        }, room=room_id, include_self=False)
+        }, room=room_id)
 
 @socketio.on('webrtc_ice_candidate')
 def handle_ice_candidate(data):
     """Handle ICE candidate"""
     target_user = data.get('target_user')
-    if target_user:
+    from_user = data.get('from_user')
+    room_id = data.get('room_id')
+    
+    print(f"Received ICE candidate from {from_user} to {target_user} in room {room_id}")
+    
+    if target_user and from_user and room_id:
         # Send to specific user
-        room_id = data['room_id']
-        from_user = data.get('from_user')
         emit('webrtc_ice_candidate', {
             'candidate': data['candidate'],
             'from_user': from_user,
             'target_user': target_user
-        }, room=room_id, include_self=False)
+        }, room=room_id)
 
 def get_room_participants(room_id):
     """Get list of current room participants"""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute('''
-            SELECT u.id, u.username
+            SELECT u.id as user_id, u.username
             FROM room_participants rp
             JOIN users u ON rp.user_id = u.id
             WHERE rp.room_id = ? AND rp.left_at IS NULL
         ''', (room_id,))
         
-        return [{'user_id': row['id'], 'username': row['username']} 
+        return [{'user_id': row['user_id'], 'username': row['username']} 
                 for row in cursor.fetchall()]
 
 # Production WSGI server setup

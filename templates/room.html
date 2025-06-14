@@ -235,7 +235,9 @@ class VideoCallApp {
         this.isScreenSharing = false;
         this.roomId = '{{ room_id }}';
         this.username = '{{ username }}';
-        this.userId = '{{ session.user_id }}';
+        this.userId = {{ session.user_id }};
+        
+        console.log("My user ID:", this.userId);
         
         this.initializeElements();
         this.setupEventListeners();
@@ -303,7 +305,7 @@ class VideoCallApp {
         });
 
         this.socket.on('user_left', (data) => {
-            console.log('User left:', data.username);
+            console.log('User left:', data.username, data.user_id);
             this.removeParticipant(data.user_id);
         });
 
@@ -314,6 +316,7 @@ class VideoCallApp {
             // Create connections with all existing users
             for (const user of users) {
                 if (user.user_id != this.userId && !this.peerConnections.has(user.user_id)) {
+                    console.log("Initiating call to existing user:", user.user_id);
                     await this.initiateCall(user.user_id);
                 }
             }
@@ -321,25 +324,39 @@ class VideoCallApp {
 
         // WebRTC signaling
         this.socket.on('webrtc_offer', async (data) => {
-            console.log('Received offer from:', data.from_user);
-            await this.handleOffer(data);
+            console.log('Received offer from:', data.from_user, 'for:', data.target_user);
+            
+            // Only process if this offer is for me
+            if (data.target_user == this.userId) {
+                await this.handleOffer(data);
+            }
         });
 
         this.socket.on('webrtc_answer', async (data) => {
-            console.log('Received answer from:', data.from_user);
-            await this.handleAnswer(data);
+            console.log('Received answer from:', data.from_user, 'for:', data.target_user);
+            
+            // Only process if this answer is for me
+            if (data.target_user == this.userId) {
+                await this.handleAnswer(data);
+            }
         });
 
         this.socket.on('webrtc_ice_candidate', async (data) => {
-            console.log('Received ICE candidate from:', data.from_user);
-            await this.handleIceCandidate(data);
+            console.log('Received ICE candidate from:', data.from_user, 'for:', data.target_user);
+            
+            // Only process if this ICE candidate is for me
+            if (data.target_user == this.userId) {
+                await this.handleIceCandidate(data);
+            }
         });
     }
 
     joinRoom() {
+        console.log("Joining room:", this.roomId, "as user:", this.userId);
         this.socket.emit('join_room', {
             room_id: this.roomId,
-            username: this.username
+            username: this.username,
+            user_id: this.userId
         });
     }
     
@@ -348,9 +365,13 @@ class VideoCallApp {
         try {
             const peerConnection = await this.createPeerConnection(userId);
             
-            const offer = await peerConnection.createOffer();
+            const offer = await peerConnection.createOffer({
+                offerToReceiveAudio: true,
+                offerToReceiveVideo: true
+            });
             await peerConnection.setLocalDescription(offer);
             
+            console.log("Sending offer to:", userId, "from:", this.userId);
             this.socket.emit('webrtc_offer', {
                 room_id: this.roomId,
                 offer: offer,
@@ -436,6 +457,7 @@ class VideoCallApp {
             const answer = await peerConnection.createAnswer();
             await peerConnection.setLocalDescription(answer);
 
+            console.log("Sending answer to:", data.from_user, "from:", this.userId);
             this.socket.emit('webrtc_answer', {
                 room_id: this.roomId,
                 answer: answer,
