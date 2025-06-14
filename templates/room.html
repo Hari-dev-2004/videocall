@@ -1,0 +1,600 @@
+{% extends "base.html" %}
+
+{% block title %}{{ room_name }} - VideoCall{% endblock %}
+
+{% block extra_css %}
+<style>
+    .video-container {
+        display: grid;
+        gap: 15px;
+        margin-bottom: 20px;
+        min-height: 400px;
+    }
+
+    .video-container.single {
+        grid-template-columns: 1fr;
+    }
+
+    .video-container.dual {
+        grid-template-columns: 1fr 1fr;
+    }
+
+    .video-container.multiple {
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    }
+
+    .video-wrapper {
+        position: relative;
+        border-radius: 12px;
+        overflow: hidden;
+        background: #000;
+        aspect-ratio: 16/9;
+    }
+
+    .video-element {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        border-radius: 12px;
+    }
+
+    .video-overlay {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        background: linear-gradient(transparent, rgba(0,0,0,0.7));
+        color: white;
+        padding: 15px;
+        font-weight: 600;
+    }
+
+    .controls {
+        background: rgba(255, 255, 255, 0.95);
+        border-radius: 12px;
+        padding: 20px;
+        display: flex;
+        justify-content: center;
+        gap: 15px;
+        flex-wrap: wrap;
+        backdrop-filter: blur(10px);
+        margin-bottom: 20px;
+    }
+
+    .control-btn {
+        width: 50px;
+        height: 50px;
+        border-radius: 50%;
+        border: none;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 20px;
+        transition: all 0.3s ease;
+        color: white;
+    }
+
+    .control-btn.video-on {
+        background: #28a745;
+    }
+
+    .control-btn.video-off {
+        background: #dc3545;
+    }
+
+    .control-btn.audio-on {
+        background: #17a2b8;
+    }
+
+    .control-btn.audio-off {
+        background: #dc3545;
+    }
+
+    .control-btn.screen-share {
+        background: #6f42c1;
+    }
+
+    .control-btn.leave {
+        background: #dc3545;
+    }
+
+    .control-btn:hover {
+        transform: scale(1.1);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    }
+
+    .room-info {
+        background: rgba(255, 255, 255, 0.9);
+        border-radius: 12px;
+        padding: 20px;
+        margin-bottom: 20px;
+        backdrop-filter: blur(10px);
+    }
+
+    .participants-list {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-top: 10px;
+    }
+
+    .participant {
+        background: #e9ecef;
+        padding: 8px 16px;
+        border-radius: 20px;
+        font-size: 14px;
+        display: flex;
+        align-items: center;
+    }
+
+    .connection-status {
+        padding: 8px 16px;
+        border-radius: 8px;
+        font-size: 14px;
+        margin-top: 10px;
+        text-align: center;
+    }
+
+    .status-connected {
+        background: #d4edda;
+        color: #155724;
+        border: 1px solid #c3e6cb;
+    }
+
+    .status-connecting {
+        background: #fff3cd;
+        color: #856404;
+        border: 1px solid #ffeaa7;
+    }
+
+    .status-disconnected {
+        background: #f8d7da;
+        color: #721c24;
+        border: 1px solid #f5c6cb;
+    }
+
+    @media (max-width: 768px) {
+        .video-container {
+            grid-template-columns: 1fr !important;
+        }
+        
+        .controls {
+            gap: 10px;
+        }
+        
+        .control-btn {
+            width: 45px;
+            height: 45px;
+            font-size: 18px;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="room-info">
+    <h2>🎥 {{ room_name }}</h2>
+    <p><strong>Room ID:</strong> {{ room_id }}</p>
+    <p><strong>Your Name:</strong> {{ username }}</p>
+    <div class="participants-list" id="participantsList">
+        <div class="participant">
+            <span class="status-indicator status-online"></span>
+            {{ username }} (You)
+        </div>
+    </div>
+    <div class="connection-status status-connecting" id="connectionStatus">
+        🔄 Connecting to room...
+    </div>
+</div>
+
+<div class="video-container single" id="videoContainer">
+    <div class="video-wrapper">
+        <video id="localVideo" class="video-element" autoplay muted playsinline></video>
+        <div class="video-overlay">
+            {{ username }} (You)
+        </div>
+    </div>
+</div>
+
+<div class="controls">
+    <button class="control-btn video-on" id="videoToggle" title="Toggle Video">
+        📹
+    </button>
+    <button class="control-btn audio-on" id="audioToggle" title="Toggle Audio">
+        🎤
+    </button>
+    <button class="control-btn screen-share" id="screenShare" title="Share Screen">
+        🖥️
+    </button>
+    <button class="control-btn leave" id="leaveRoom" title="Leave Room">
+        📞
+    </button>
+</div>
+
+<div class="text-center">
+    <p style="color: rgba(255,255,255,0.8); font-size: 14px;">
+        Share this URL with others to invite them: 
+        <strong id="roomUrl">{{ request.url }}</strong>
+        <button class="btn" onclick="copyRoomUrl()" style="margin-left: 10px; padding: 6px 12px; font-size: 12px;">
+            📋 Copy
+        </button>
+    </p>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+class VideoCallApp {
+    constructor() {
+        this.socket = io();
+        this.localStream = null;
+        this.peerConnections = new Map();
+        this.isVideoEnabled = true;
+        this.isAudioEnabled = true;
+        this.isScreenSharing = false;
+        this.roomId = '{{ room_id }}';
+        this.username = '{{ username }}';
+        
+        this.initializeElements();
+        this.setupEventListeners();
+        this.initializeMedia();
+        this.setupSocketEvents();
+        this.joinRoom();
+    }
+
+    initializeElements() {
+        this.localVideo = document.getElementById('localVideo');
+        this.videoContainer = document.getElementById('videoContainer');
+        this.videoToggle = document.getElementById('videoToggle');
+        this.audioToggle = document.getElementById('audioToggle');
+        this.screenShare = document.getElementById('screenShare');
+        this.leaveRoom = document.getElementById('leaveRoom');
+        this.participantsList = document.getElementById('participantsList');
+        this.connectionStatus = document.getElementById('connectionStatus');
+    }
+
+    setupEventListeners() {
+        this.videoToggle.addEventListener('click', () => this.toggleVideo());
+        this.audioToggle.addEventListener('click', () => this.toggleAudio());
+        this.screenShare.addEventListener('click', () => this.toggleScreenShare());
+        this.leaveRoom.addEventListener('click', () => this.leave());
+
+        // Handle page unload
+        window.addEventListener('beforeunload', () => {
+            this.leave();
+        });
+    }
+
+    async initializeMedia() {
+        try {
+            this.localStream = await navigator.mediaDevices.getUserMedia({
+                video: { width: 1280, height: 720 },
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true
+                }
+            });
+            
+            this.localVideo.srcObject = this.localStream;
+            this.updateConnectionStatus('Connected', 'connected');
+        } catch (error) {
+            console.error('Error accessing media devices:', error);
+            this.updateConnectionStatus('Media access denied', 'disconnected');
+            alert('Please allow camera and microphone access to use the video call.');
+        }
+    }
+
+    setupSocketEvents() {
+        this.socket.on('connect', () => {
+            console.log('Connected to server');
+        });
+
+        this.socket.on('user_joined', (data) => {
+            console.log('User joined:', data.username);
+            this.addParticipant(data.username, data.user_id);
+        });
+
+        this.socket.on('user_left', (data) => {
+            console.log('User left:', data.username);
+            this.removeParticipant(data.user_id);
+        });
+
+        this.socket.on('room_users', (users) => {
+            this.updateParticipantsList(users);
+        });
+
+        // WebRTC signaling
+        this.socket.on('webrtc_offer', async (data) => {
+            await this.handleOffer(data);
+        });
+
+        this.socket.on('webrtc_answer', async (data) => {
+            await this.handleAnswer(data);
+        });
+
+        this.socket.on('webrtc_ice_candidate', async (data) => {
+            await this.handleIceCandidate(data);
+        });
+    }
+
+    joinRoom() {
+        this.socket.emit('join_room', {
+            room_id: this.roomId,
+            username: this.username
+        });
+    }
+
+    async createPeerConnection(userId) {
+        const configuration = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' }
+            ]
+        };
+
+        const peerConnection = new RTCPeerConnection(configuration);
+
+        // Add local stream
+        if (this.localStream) {
+            this.localStream.getTracks().forEach(track => {
+                peerConnection.addTrack(track, this.localStream);
+            });
+        }
+
+        // Handle remote stream
+        peerConnection.ontrack = (event) => {
+            this.handleRemoteStream(event.streams[0], userId);
+        };
+
+        // Handle ICE candidates
+        peerConnection.onicecandidate = (event) => {
+            if (event.candidate) {
+                this.socket.emit('webrtc_ice_candidate', {
+                    room_id: this.roomId,
+                    candidate: event.candidate,
+                    target_user: userId
+                });
+            }
+        };
+
+        this.peerConnections.set(userId, peerConnection);
+        return peerConnection;
+    }
+
+    async handleOffer(data) {
+        const peerConnection = await this.createPeerConnection(data.from_user);
+        
+        await peerConnection.setRemoteDescription(data.offer);
+        const answer = await peerConnection.createAnswer();
+        await peerConnection.setLocalDescription(answer);
+
+        this.socket.emit('webrtc_answer', {
+            room_id: this.roomId,
+            answer: answer,
+            target_user: data.from_user
+        });
+    }
+
+    async handleAnswer(data) {
+        const peerConnection = this.peerConnections.get(data.from_user);
+        if (peerConnection) {
+            await peerConnection.setRemoteDescription(data.answer);
+        }
+    }
+
+    async handleIceCandidate(data) {
+        const peerConnection = this.peerConnections.get(data.from_user);
+        if (peerConnection) {
+            await peerConnection.addIceCandidate(data.candidate);
+        }
+    }
+
+    handleRemoteStream(stream, userId) {
+        // Create video element for remote user
+        const videoWrapper = document.createElement('div');
+        videoWrapper.className = 'video-wrapper';
+        videoWrapper.id = `video-${userId}`;
+
+        const video = document.createElement('video');
+        video.className = 'video-element';
+        video.autoplay = true;
+        video.playsinline = true;
+        video.srcObject = stream;
+
+        const overlay = document.createElement('div');
+        overlay.className = 'video-overlay';
+        overlay.textContent = `User ${userId}`;
+
+        videoWrapper.appendChild(video);
+        videoWrapper.appendChild(overlay);
+        this.videoContainer.appendChild(videoWrapper);
+
+        this.updateVideoLayout();
+    }
+
+    updateVideoLayout() {
+        const videoCount = this.videoContainer.children.length;
+        
+        if (videoCount === 1) {
+            this.videoContainer.className = 'video-container single';
+        } else if (videoCount === 2) {
+            this.videoContainer.className = 'video-container dual';
+        } else {
+            this.videoContainer.className = 'video-container multiple';
+        }
+    }
+
+    toggleVideo() {
+        if (this.localStream) {
+            const videoTrack = this.localStream.getVideoTracks()[0];
+            if (videoTrack) {
+                videoTrack.enabled = !videoTrack.enabled;
+                this.isVideoEnabled = videoTrack.enabled;
+                
+                this.videoToggle.className = this.isVideoEnabled ? 
+                    'control-btn video-on' : 'control-btn video-off';
+                this.videoToggle.textContent = this.isVideoEnabled ? '📹' : '📹';
+            }
+        }
+    }
+
+    async toggleScreenShare() {
+        try {
+            if (!this.isScreenSharing) {
+                // Start screen sharing
+                const screenStream = await navigator.mediaDevices.getDisplayMedia({
+                    video: true,
+                    audio: true
+                });
+
+                // Replace video track in all peer connections
+                const videoTrack = screenStream.getVideoTracks()[0];
+                this.peerConnections.forEach(async (peerConnection) => {
+                    const sender = peerConnection.getSenders().find(s => 
+                        s.track && s.track.kind === 'video'
+                    );
+                    if (sender) {
+                        await sender.replaceTrack(videoTrack);
+                    }
+                });
+
+                // Update local video
+                this.localVideo.srcObject = screenStream;
+                this.isScreenSharing = true;
+                this.screenShare.style.background = '#28a745';
+
+                // Handle screen share end
+                videoTrack.onended = () => {
+                    this.stopScreenShare();
+                };
+
+            } else {
+                this.stopScreenShare();
+            }
+        } catch (error) {
+            console.error('Error sharing screen:', error);
+        }
+    }
+
+    async stopScreenShare() {
+        if (this.localStream) {
+            const videoTrack = this.localStream.getVideoTracks()[0];
+            
+            // Replace screen share with camera in all peer connections
+            this.peerConnections.forEach(async (peerConnection) => {
+                const sender = peerConnection.getSenders().find(s => 
+                    s.track && s.track.kind === 'video'
+                );
+                if (sender && videoTrack) {
+                    await sender.replaceTrack(videoTrack);
+                }
+            });
+
+            // Restore local video
+            this.localVideo.srcObject = this.localStream;
+        }
+
+        this.isScreenSharing = false;
+        this.screenShare.style.background = '#6f42c1';
+    }
+
+    addParticipant(username, userId) {
+        const participant = document.createElement('div');
+        participant.className = 'participant';
+        participant.id = `participant-${userId}`;
+        participant.innerHTML = `
+            <span class="status-indicator status-online"></span>
+            ${username}
+        `;
+        this.participantsList.appendChild(participant);
+    }
+
+    removeParticipant(userId) {
+        const participant = document.getElementById(`participant-${userId}`);
+        if (participant) {
+            participant.remove();
+        }
+
+        // Remove video element
+        const videoElement = document.getElementById(`video-${userId}`);
+        if (videoElement) {
+            videoElement.remove();
+            this.updateVideoLayout();
+        }
+
+        // Close peer connection
+        const peerConnection = this.peerConnections.get(userId);
+        if (peerConnection) {
+            peerConnection.close();
+            this.peerConnections.delete(userId);
+        }
+    }
+
+    updateParticipantsList(users) {
+        // Clear existing participants (except self)
+        const participants = this.participantsList.querySelectorAll('.participant:not(:first-child)');
+        participants.forEach(p => p.remove());
+
+        // Add current users
+        users.forEach(user => {
+            if (user.username !== this.username) {
+                this.addParticipant(user.username, user.user_id);
+            }
+        });
+    }
+
+    updateConnectionStatus(message, status) {
+        this.connectionStatus.textContent = message;
+        this.connectionStatus.className = `connection-status status-${status}`;
+    }
+
+    leave() {
+        // Clean up streams
+        if (this.localStream) {
+            this.localStream.getTracks().forEach(track => track.stop());
+        }
+
+        // Close all peer connections
+        this.peerConnections.forEach(peerConnection => {
+            peerConnection.close();
+        });
+
+        // Leave room
+        this.socket.emit('leave_room', {
+            room_id: this.roomId
+        });
+
+        // Redirect to home
+        window.location.href = '/';
+    }
+}
+
+// Utility functions
+function copyRoomUrl() {
+    const roomUrl = document.getElementById('roomUrl').textContent;
+    navigator.clipboard.writeText(roomUrl).then(() => {
+        alert('Room URL copied to clipboard!');
+    }).catch(err => {
+        console.error('Failed to copy URL:', err);
+    });
+}
+
+// Initialize the app when DOM is loaded
+document.addEventListener('DOMContentLoaded', function() {
+    new VideoCallApp();
+});
+</script>
+{% endblock %}
+
+    toggleAudio() {
+        if (this.localStream) {
+            const audioTrack = this.localStream.getAudioTracks()[0];
+            if (audioTrack) {
+                audioTrack.enabled = !audioTrack.enabled;
+                this.isAudioEnabled = audioTrack.enabled;
+                
+                this.audioToggle.className = this.isAudioEnabled ? 
+                    'control-btn audio-on' : 'control-btn audio-off';
+                this.audioToggle.textContent = this.isAudioEnabled ? '🎤' : '🔇';

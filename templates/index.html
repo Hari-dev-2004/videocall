@@ -1,0 +1,180 @@
+{% extends "base.html" %}
+
+{% block title %}VideoCall Platform - Home{% endblock %}
+
+{% block content %}
+<div class="text-center mb-4">
+    <h1>🎥 VideoCall Platform</h1>
+    <p>Connect with others through high-quality video calls</p>
+</div>
+
+<div class="card" style="max-width: 500px; margin: 0 auto;">
+    <div class="tabs">
+        <button class="tab-btn active" onclick="showTab('create')">Create Room</button>
+        <button class="tab-btn" onclick="showTab('join')">Join Room</button>
+    </div>
+    
+    <div id="create-tab" class="tab-content active">
+        <h2 class="text-center mb-4">Create a New Room</h2>
+        <form method="POST" action="/create">
+            <div class="form-group">
+                <label for="username-create">Your Name</label>
+                <input type="text" id="username-create" name="username" required 
+                       placeholder="Enter your name" maxlength="50">
+            </div>
+            
+            <div class="form-group">
+                <label for="room_name">Room Name</label>
+                <input type="text" id="room_name" name="room_name" required 
+                       placeholder="Enter room name" maxlength="100">
+            </div>
+            
+            <div class="form-group text-center">
+                <button type="submit" class="btn">
+                    🚀 Create Room
+                </button>
+            </div>
+        </form>
+    </div>
+    
+    <div id="join-tab" class="tab-content">
+        <h2 class="text-center mb-4">Join Existing Room</h2>
+        <form method="POST" action="/join">
+            <div class="form-group">
+                <label for="username-join">Your Name</label>
+                <input type="text" id="username-join" name="username" required 
+                       placeholder="Enter your name" maxlength="50">
+            </div>
+            
+            <div class="form-group">
+                <label for="room_id">Room ID</label>
+                <input type="text" id="room_id" name="room_id" required 
+                       placeholder="Enter room ID" maxlength="8">
+            </div>
+            
+            <div class="form-group text-center">
+                <button type="submit" class="btn">
+                    🚪 Join Room
+                </button>
+            </div>
+        </form>
+    </div>
+    
+    <div class="text-center mt-4">
+        <p style="color: #666; font-size: 14px;">
+            ✨ Features: HD Video • Crystal Clear Audio • Screen Sharing • Secure Connection
+        </p>
+    </div>
+</div>
+
+<div class="text-center mt-4">
+    <div class="alert alert-info" style="max-width: 500px; margin: 0 auto;">
+        <strong>💡 How it works:</strong><br>
+        1. Enter your name and create a room or join with a room ID<br>
+        2. Share the room URL with others<br>
+        3. Start your video call instantly!
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Form validation
+    const createForm = document.querySelector('#create-tab form');
+    const joinForm = document.querySelector('#join-tab form');
+    
+    createForm.addEventListener('submit', function(e) {
+        const username = document.getElementById('username-create');
+        const roomName = document.getElementById('room_name');
+        
+        if (username.value.trim().length < 2) {
+            e.preventDefault();
+            alert('Please enter a name with at least 2 characters');
+            username.focus();
+            return;
+        }
+
+        if (roomName.value.trim().length < 3) {
+            e.preventDefault();
+            alert('Please enter a room name with at least 3 characters');
+            roomName.focus();
+            return;
+        }
+    });
+    
+    joinForm.addEventListener('submit', function(e) {
+        const username = document.getElementById('username-join');
+        const roomId = document.getElementById('room_id');
+        
+        if (username.value.trim().length < 2) {
+            e.preventDefault();
+            alert('Please enter a name with at least 2 characters');
+            username.focus();
+            return;
+        }
+
+        if (roomId.value.trim().length !== 8) {
+            e.preventDefault();
+            alert('Please enter a valid 8-character room ID');
+            roomId.focus();
+            return;
+        }
+    });
+
+    // Auto-focus first input
+    document.getElementById('username-create').focus();
+});
+
+function showTab(tabName) {
+    // Hide all tabs
+    const tabs = document.querySelectorAll('.tab-content');
+    tabs.forEach(tab => tab.classList.remove('active'));
+    
+    // Show selected tab
+    document.getElementById(tabName + '-tab').classList.add('active');
+    
+    // Update tab buttons
+    const buttons = document.querySelectorAll('.tab-btn');
+    buttons.forEach(btn => btn.classList.remove('active'));
+    
+    // Activate clicked button
+    event.currentTarget.classList.add('active');
+    
+    // Focus on username input of active tab
+    document.getElementById('username-' + tabName).focus();
+}
+</script>
+
+<style>
+.tabs {
+    display: flex;
+    margin-bottom: 20px;
+    border-bottom: 1px solid #ddd;
+}
+
+.tab-btn {
+    flex: 1;
+    padding: 10px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-weight: 500;
+    color: #666;
+    border-bottom: 3px solid transparent;
+}
+
+.tab-btn.active {
+    color: #4a89dc;
+    border-bottom: 3px solid #4a89dc;
+}
+
+.tab-content {
+    display: none;
+}
+
+.tab-content.active {
+    display: block;
+}
+</style>
+{% endblock %}
