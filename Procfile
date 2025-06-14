@@ -1,1 +1,1 @@
-web: gunicorn --worker-class gevent -w 1 app:app 
+web: gunicorn --worker-class gthread --threads 8 wsgi:app 
