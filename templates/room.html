@@ -19,8 +19,19 @@
         grid-template-columns: 1fr 1fr;
     }
 
+    .video-container.triple {
+        grid-template-columns: 1fr 1fr;
+        grid-template-rows: 1fr 1fr;
+    }
+    
+    .video-container.quad {
+        grid-template-columns: 1fr 1fr;
+        grid-template-rows: 1fr 1fr;
+    }
+
     .video-container.multiple {
         grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        grid-auto-rows: 1fr;
     }
 
     .video-wrapper {
@@ -47,6 +58,51 @@
         color: white;
         padding: 15px;
         font-weight: 600;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+    
+    .video-status {
+        display: flex;
+        gap: 5px;
+    }
+    
+    .video-status-icon {
+        width: 24px;
+        height: 24px;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.3);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    
+    .video-muted::after {
+        content: '🔇';
+        font-size: 12px;
+    }
+    
+    .video-off::after {
+        content: '📵';
+        font-size: 12px;
+    }
+    
+    .video-wrapper.no-video::before {
+        content: attr(data-username);
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        font-size: 3em;
+        color: white;
+        background: rgba(0, 0, 0, 0.5);
+        width: 100px;
+        height: 100px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
     }
 
     .controls {
@@ -110,6 +166,22 @@
         padding: 20px;
         margin-bottom: 20px;
         backdrop-filter: blur(10px);
+        display: flex;
+        flex-direction: column;
+    }
+    
+    .room-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+    
+    .participants-count {
+        background: #007bff;
+        color: white;
+        border-radius: 20px;
+        padding: 5px 12px;
+        font-weight: bold;
     }
 
     .participants-list {
@@ -126,6 +198,17 @@
         font-size: 14px;
         display: flex;
         align-items: center;
+    }
+    
+    .status-indicator {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        margin-right: 6px;
+    }
+    
+    .status-online {
+        background: #28a745;
     }
 
     .connection-status {
@@ -174,7 +257,12 @@
 
 {% block content %}
 <div class="room-info">
-    <h2>🎥 {{ room_name }}</h2>
+    <div class="room-header">
+        <h2>🎥 {{ room_name }}</h2>
+        <div class="participants-count" id="participantsCount">
+            1 Participant
+        </div>
+    </div>
     <p><strong>Room ID:</strong> {{ room_id }}</p>
     <p><strong>Your Name:</strong> {{ username }}</p>
     <p><strong>Your User ID:</strong> <span id="myUserId">{{ session.user_id }}</span></p>
@@ -193,7 +281,10 @@
     <div class="video-wrapper">
         <video id="localVideo" class="video-element" autoplay muted playsinline></video>
         <div class="video-overlay">
-            {{ username }} (You)
+            <span>{{ username }} (You)</span>
+            <div class="video-status" id="localVideoStatus">
+                <!-- Status icons will be dynamically added -->
+            </div>
         </div>
     </div>
 </div>
@@ -237,6 +328,9 @@ class VideoCallApp {
         this.roomId = '{{ room_id }}';
         this.username = '{{ username }}';
         this.userId = parseInt('{{ session.user_id }}');
+        this.participantCount = 1; // Start with just yourself
+        this.heartbeatInterval = null;
+        this.connectionCheckInterval = null;
         
         console.log("My user ID:", this.userId);
         
@@ -244,6 +338,7 @@ class VideoCallApp {
         this.setupEventListeners();
         this.connectSocket();
         this.initializeMedia();
+        this.startHeartbeat();
     }
 
     initializeElements() {
@@ -254,6 +349,7 @@ class VideoCallApp {
         this.screenShare = document.getElementById('screenShare');
         this.leaveRoom = document.getElementById('leaveRoom');
         this.participantsList = document.getElementById('participantsList');
+        this.participantsCount = document.getElementById('participantsCount');
         this.connectionStatus = document.getElementById('connectionStatus');
     }
 
@@ -341,6 +437,7 @@ class VideoCallApp {
         this.socket.on('user_joined', async (data) => {
             console.log('User joined:', data.username, data.user_id);
             this.addParticipant(data.username, data.user_id);
+            this.updateParticipantCount(1);
             
             // Initiate WebRTC connection to the new user
             await this.initiateCall(parseInt(data.user_id));
@@ -349,11 +446,13 @@ class VideoCallApp {
         this.socket.on('user_left', (data) => {
             console.log('User left:', data.username, data.user_id);
             this.removeParticipant(data.user_id);
+            this.updateParticipantCount(-1);
         });
 
         this.socket.on('room_users', async (users) => {
             console.log('Room users:', users);
             this.updateParticipantsList(users);
+            this.updateParticipantCount(users.length - 1); // Excluding yourself
             
             // Create connections with all existing users
             for (const user of users) {
@@ -396,11 +495,21 @@ class VideoCallApp {
             console.log('Disconnected from server');
             this.updateConnectionStatus('Disconnected from server', 'disconnected');
         });
+
+        this.socket.on('media_status_change', (data) => {
+            console.log('Media status change:', data);
+            
+            if (parseInt(data.user_id) === this.userId) return; // Ignore own status
+            
+            // Update remote video UI
+            this.updateRemoteMediaStatus(parseInt(data.user_id), data.audio_enabled, data.video_enabled);
+        });
     }
 
     joinRoom() {
         if (!this.socket || !this.socket.connected) {
             console.error('Socket not connected, cannot join room');
+            setTimeout(() => this.joinRoom(), 2000); // Retry after 2 seconds
             return;
         }
         
@@ -432,13 +541,26 @@ class VideoCallApp {
             });
         } catch (error) {
             console.error('Error initiating call:', error);
+            
+            // Retry after a delay
+            setTimeout(() => this.initiateCall(userId), 3000);
         }
     }
 
     async createPeerConnection(userId) {
         // Check if connection already exists
         if (this.peerConnections.has(userId)) {
-            return this.peerConnections.get(userId);
+            const existingConnection = this.peerConnections.get(userId);
+            
+            // If the connection is already closed, remove it and create a new one
+            if (existingConnection.connectionState === 'closed' || 
+                existingConnection.iceConnectionState === 'disconnected' || 
+                existingConnection.iceConnectionState === 'failed') {
+                this.peerConnections.delete(userId);
+                console.log('Removing existing closed connection for user:', userId);
+            } else {
+                return existingConnection;
+            }
         }
         
         const configuration = {
@@ -452,6 +574,11 @@ class VideoCallApp {
                     urls: 'turn:numb.viagenie.ca',
                     credential: 'muazkh',
                     username: 'webrtc@live.com'
+                },
+                {
+                    urls: 'turn:turn.anyfirewall.com:443?transport=tcp',
+                    credential: 'webrtc',
+                    username: 'webrtc'
                 }
             ],
             iceCandidatePoolSize: 10
@@ -468,6 +595,22 @@ class VideoCallApp {
             });
         } else {
             console.error('No local stream available when creating peer connection');
+            
+            // Try to get media access if not available
+            try {
+                this.localStream = await navigator.mediaDevices.getUserMedia({
+                    video: true,
+                    audio: true
+                });
+                
+                this.localStream.getTracks().forEach(track => {
+                    peerConnection.addTrack(track, this.localStream);
+                });
+                
+                this.localVideo.srcObject = this.localStream;
+            } catch (err) {
+                console.error('Could not get media access:', err);
+            }
         }
 
         // Handle remote stream
@@ -496,14 +639,40 @@ class VideoCallApp {
             if (peerConnection.iceConnectionState === 'connected' || 
                 peerConnection.iceConnectionState === 'completed') {
                 console.log(`Connection established with user ${userId}`);
+                
+                // Update the participant status
+                const participantElement = document.getElementById(`participant-${userId}`);
+                if (participantElement) {
+                    const statusIndicator = participantElement.querySelector('.status-indicator');
+                    if (statusIndicator) {
+                        statusIndicator.className = 'status-indicator status-online';
+                    }
+                }
             }
             else if (peerConnection.iceConnectionState === 'failed' || 
-                peerConnection.iceConnectionState === 'disconnected') {
-                // Try reconnecting
+                peerConnection.iceConnectionState === 'disconnected' ||
+                peerConnection.iceConnectionState === 'closed') {
+                
                 console.log('Connection failed, attempting to reconnect...');
+                
+                // Update the participant status
+                const participantElement = document.getElementById(`participant-${userId}`);
+                if (participantElement) {
+                    const statusIndicator = participantElement.querySelector('.status-indicator');
+                    if (statusIndicator) {
+                        statusIndicator.className = 'status-indicator';
+                        statusIndicator.style.background = '#dc3545';
+                    }
+                }
+                
+                // Close and remove the existing connection
+                peerConnection.close();
+                this.peerConnections.delete(userId);
+                
+                // Try reconnecting after a delay
                 setTimeout(() => {
                     this.initiateCall(userId);
-                }, 2000);
+                }, 3000);
             }
         };
         
@@ -535,9 +704,29 @@ class VideoCallApp {
             const fromUserId = parseInt(data.from_user);
             const peerConnection = await this.createPeerConnection(fromUserId);
             
-            if (peerConnection.signalingState === 'stable') {
-                await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
+            // Check for collisions (both sides creating an offer)
+            const isPolite = this.userId > fromUserId;
+            
+            try {
+                if (peerConnection.signalingState !== 'stable') {
+                    // If we're impolite, just ignore the offer
+                    if (!isPolite) {
+                        console.log('Ignoring offer (impolite) from:', fromUserId);
+                        return;
+                    }
+                    
+                    // If polite, rollback and continue
+                    console.log('Signaling state collision, rolling back');
+                    await Promise.all([
+                        peerConnection.setLocalDescription({type: 'rollback'}),
+                        peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer))
+                    ]);
+                } else {
+                    // Stable state, proceed normally
+                    await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
+                }
                 
+                // Create and send answer
                 const answer = await peerConnection.createAnswer();
                 await peerConnection.setLocalDescription(answer);
 
@@ -548,11 +737,18 @@ class VideoCallApp {
                     target_user: fromUserId,
                     from_user: this.userId
                 });
-            } else {
-                console.log('Ignoring offer in non-stable state:', peerConnection.signalingState);
+            } catch (err) {
+                console.error('Error handling offer:', err);
+                
+                // If there was an error, close and recreate the connection
+                peerConnection.close();
+                this.peerConnections.delete(fromUserId);
+                
+                // Wait and try again with a new peer connection
+                setTimeout(() => this.initiateCall(fromUserId), 2000);
             }
         } catch (error) {
-            console.error('Error handling offer:', error);
+            console.error('Error creating peer connection:', error);
         }
     }
 
@@ -566,6 +762,9 @@ class VideoCallApp {
                 console.log('Successfully set remote description from answer');
             } else {
                 console.error('No peer connection found for user:', fromUserId);
+                
+                // Create connection if it doesn't exist
+                await this.initiateCall(fromUserId);
             }
         } catch (error) {
             console.error('Error handling answer:', error);
@@ -596,10 +795,19 @@ class VideoCallApp {
         if (existingVideo) {
             const videoElement = existingVideo.querySelector('video');
             if (videoElement) {
-                videoElement.srcObject = stream;
-                console.log('Updated existing video element with new stream');
+                if (videoElement.srcObject !== stream) {
+                    videoElement.srcObject = stream;
+                    console.log('Updated existing video element with new stream');
+                }
                 return;
             }
+        }
+        
+        // Get username for this user ID
+        let username = 'User ' + userId;
+        const participantElement = document.getElementById(`participant-${userId}`);
+        if (participantElement) {
+            username = participantElement.textContent.trim();
         }
         
         // Create video element for remote user
@@ -621,18 +829,23 @@ class VideoCallApp {
         
         video.onplaying = () => {
             console.log(`Remote video is now playing for user ${userId}`);
+            
+            // Update the participant status
+            const participantElement = document.getElementById(`participant-${userId}`);
+            if (participantElement) {
+                const statusIndicator = participantElement.querySelector('.status-indicator');
+                if (statusIndicator) {
+                    statusIndicator.className = 'status-indicator status-online';
+                }
+            }
         };
-
-        // Get username for this user ID
-        let username = 'User ' + userId;
-        const participantElement = document.getElementById(`participant-${userId}`);
-        if (participantElement) {
-            username = participantElement.textContent.trim();
-        }
 
         const overlay = document.createElement('div');
         overlay.className = 'video-overlay';
-        overlay.textContent = username;
+        overlay.innerHTML = `
+            <span>${username}</span>
+            <div class="video-status" id="videoStatus-${userId}"></div>
+        `;
 
         videoWrapper.appendChild(video);
         videoWrapper.appendChild(overlay);
@@ -648,9 +861,20 @@ class VideoCallApp {
             this.videoContainer.className = 'video-container single';
         } else if (videoCount === 2) {
             this.videoContainer.className = 'video-container dual';
+        } else if (videoCount === 3) {
+            this.videoContainer.className = 'video-container triple';
+        } else if (videoCount === 4) {
+            this.videoContainer.className = 'video-container quad';
         } else {
             this.videoContainer.className = 'video-container multiple';
         }
+        
+        // Update all video aspects based on new layout
+        const aspectRatio = videoCount <= 4 ? '16/9' : '4/3';
+        const videoWrappers = this.videoContainer.querySelectorAll('.video-wrapper');
+        videoWrappers.forEach(wrapper => {
+            wrapper.style.aspectRatio = aspectRatio;
+        });
     }
 
     toggleVideo() {
@@ -665,6 +889,12 @@ class VideoCallApp {
                 this.videoToggle.textContent = this.isVideoEnabled ? '📹' : '📹';
                 
                 console.log('Video track enabled:', this.isVideoEnabled);
+                
+                // Update UI
+                this.updateLocalMediaStatus();
+                
+                // Notify others about media status change
+                this.broadcastMediaStatus();
             }
         }
     }
@@ -681,6 +911,12 @@ class VideoCallApp {
                 this.audioToggle.textContent = this.isAudioEnabled ? '🎤' : '🔇';
                 
                 console.log('Audio track enabled:', this.isAudioEnabled);
+                
+                // Update UI
+                this.updateLocalMediaStatus();
+                
+                // Notify others about media status change
+                this.broadcastMediaStatus();
             }
         }
     }
@@ -690,18 +926,33 @@ class VideoCallApp {
             if (!this.isScreenSharing) {
                 // Start screen sharing
                 const screenStream = await navigator.mediaDevices.getDisplayMedia({
-                    video: true,
-                    audio: true
+                    video: {
+                        cursor: "always"
+                    },
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true
+                    }
                 });
 
                 // Replace video track in all peer connections
                 const videoTrack = screenStream.getVideoTracks()[0];
+                
+                // Keep reference to camera stream before replacing
+                this.cameraStream = this.localStream;
+                
+                // Store screen sharing stream
+                this.screenSharingStream = screenStream;
+                
+                // Replace tracks in all peer connections
                 this.peerConnections.forEach(async (peerConnection) => {
-                    const sender = peerConnection.getSenders().find(s => 
+                    const senders = peerConnection.getSenders();
+                    const videoSender = senders.find(s => 
                         s.track && s.track.kind === 'video'
                     );
-                    if (sender) {
-                        await sender.replaceTrack(videoTrack);
+                    
+                    if (videoSender) {
+                        await videoSender.replaceTrack(videoTrack);
                         console.log('Replaced video track with screen share');
                     }
                 });
@@ -725,8 +976,10 @@ class VideoCallApp {
     }
 
     async stopScreenShare() {
-        if (this.localStream) {
-            const videoTrack = this.localStream.getVideoTracks()[0];
+        if (!this.isScreenSharing) return;
+        
+        if (this.cameraStream) {
+            const videoTrack = this.cameraStream.getVideoTracks()[0];
             
             // Replace screen share with camera in all peer connections
             this.peerConnections.forEach(async (peerConnection) => {
@@ -740,7 +993,14 @@ class VideoCallApp {
             });
 
             // Restore local video
-            this.localVideo.srcObject = this.localStream;
+            this.localVideo.srcObject = this.cameraStream;
+            
+            // Stop all tracks in screen sharing stream
+            if (this.screenSharingStream) {
+                this.screenSharingStream.getTracks().forEach(track => {
+                    track.stop();
+                });
+            }
         }
 
         this.isScreenSharing = false;
@@ -757,7 +1017,7 @@ class VideoCallApp {
         participant.className = 'participant';
         participant.id = `participant-${userId}`;
         participant.innerHTML = `
-            <span class="status-indicator status-online"></span>
+            <span class="status-indicator" style="background: #ffc107;"></span>
             ${username}
         `;
         this.participantsList.appendChild(participant);
@@ -803,6 +1063,17 @@ class VideoCallApp {
         
         console.log(`Participants list updated with ${users.length} users`);
     }
+    
+    updateParticipantCount(change) {
+        // Update participant count (adding or subtracting)
+        if (change !== 0) {
+            this.participantCount += change;
+            if (this.participantCount < 1) this.participantCount = 1; // Ensure at least 1 (yourself)
+            
+            const participantText = this.participantCount === 1 ? 'Participant' : 'Participants';
+            this.participantsCount.textContent = `${this.participantCount} ${participantText}`;
+        }
+    }
 
     updateConnectionStatus(message, status) {
         this.connectionStatus.textContent = message;
@@ -810,12 +1081,134 @@ class VideoCallApp {
         console.log(`Connection status: ${message} (${status})`);
     }
 
+    startHeartbeat() {
+        // Poll for active participants every 10 seconds
+        this.heartbeatInterval = setInterval(() => {
+            this.checkRoomStatus();
+        }, 10000);
+        
+        // Check connection status of peers every 5 seconds
+        this.connectionCheckInterval = setInterval(() => {
+            this.checkPeerConnections();
+        }, 5000);
+    }
+    
+    stopHeartbeat() {
+        if (this.heartbeatInterval) {
+            clearInterval(this.heartbeatInterval);
+            this.heartbeatInterval = null;
+        }
+        
+        if (this.connectionCheckInterval) {
+            clearInterval(this.connectionCheckInterval);
+            this.connectionCheckInterval = null;
+        }
+    }
+    
+    async checkRoomStatus() {
+        try {
+            const response = await fetch(`/api/rooms/${this.roomId}/status`);
+            const data = await response.json();
+            
+            if (data.error) {
+                console.error('Room status error:', data.error);
+                return;
+            }
+            
+            // Update participant count
+            const participantCount = data.active_participants_count;
+            if (participantCount !== this.participantCount) {
+                this.participantCount = participantCount;
+                const participantText = this.participantCount === 1 ? 'Participant' : 'Participants';
+                this.participantsCount.textContent = `${this.participantCount} ${participantText}`;
+            }
+            
+            // Check for any new participants that we might have missed
+            const knownParticipantIds = Array.from(this.peerConnections.keys());
+            const serverParticipantIds = data.participants.map(p => parseInt(p.user_id)).filter(id => id !== this.userId);
+            
+            // Look for participants on the server that we don't have connections with
+            for (const participantId of serverParticipantIds) {
+                if (!knownParticipantIds.includes(participantId)) {
+                    console.log(`Discovered missing participant: ${participantId}`);
+                    
+                    // Find username
+                    const participant = data.participants.find(p => parseInt(p.user_id) === participantId);
+                    if (participant) {
+                        // Add participant to UI
+                        this.addParticipant(participant.username, participantId);
+                        
+                        // Initiate call
+                        await this.initiateCall(participantId);
+                    }
+                }
+            }
+            
+            // Look for participants we have connections with but are not on the server
+            for (const participantId of knownParticipantIds) {
+                if (!serverParticipantIds.includes(participantId)) {
+                    console.log(`Removing stale participant: ${participantId}`);
+                    this.removeParticipant(participantId);
+                }
+            }
+            
+        } catch (error) {
+            console.error('Error checking room status:', error);
+        }
+    }
+    
+    checkPeerConnections() {
+        for (const [userId, peerConnection] of this.peerConnections.entries()) {
+            const state = peerConnection.iceConnectionState;
+            console.log(`Checking peer ${userId} connection state: ${state}`);
+            
+            // Update UI based on connection state
+            const participantElement = document.getElementById(`participant-${userId}`);
+            if (participantElement) {
+                const statusIndicator = participantElement.querySelector('.status-indicator');
+                if (statusIndicator) {
+                    if (state === 'connected' || state === 'completed') {
+                        statusIndicator.className = 'status-indicator status-online';
+                    } else if (state === 'checking' || state === 'new') {
+                        statusIndicator.style.background = '#ffc107'; // yellow/amber
+                    } else {
+                        statusIndicator.style.background = '#dc3545'; // red
+                    }
+                }
+            }
+            
+            // If disconnected for a while, attempt to reconnect
+            if (state === 'disconnected' || state === 'failed' || state === 'closed') {
+                console.log(`Connection with peer ${userId} is ${state}, attempting to reconnect`);
+                
+                // Close existing connection
+                peerConnection.close();
+                this.peerConnections.delete(userId);
+                
+                // Attempt to reconnect
+                setTimeout(() => {
+                    this.initiateCall(userId);
+                }, 1000);
+            }
+        }
+    }
+
     leave() {
+        // Stop heartbeat
+        this.stopHeartbeat();
+        
         // Clean up streams
         if (this.localStream) {
             this.localStream.getTracks().forEach(track => {
                 track.stop();
                 console.log(`Stopped ${track.kind} track`);
+            });
+        }
+        
+        // Stop screen sharing if active
+        if (this.isScreenSharing && this.screenSharingStream) {
+            this.screenSharingStream.getTracks().forEach(track => {
+                track.stop();
             });
         }
 
@@ -836,6 +1229,91 @@ class VideoCallApp {
 
         // Redirect to home
         window.location.href = '/';
+    }
+
+    updateLocalMediaStatus() {
+        const statusContainer = document.getElementById('localVideoStatus');
+        if (statusContainer) {
+            // Clear previous status
+            statusContainer.innerHTML = '';
+            
+            // Add audio status if needed
+            if (!this.isAudioEnabled) {
+                const audioStatus = document.createElement('div');
+                audioStatus.className = 'video-status-icon video-muted';
+                statusContainer.appendChild(audioStatus);
+            }
+            
+            // Add video status if needed
+            if (!this.isVideoEnabled) {
+                const videoStatus = document.createElement('div');
+                videoStatus.className = 'video-status-icon video-off';
+                statusContainer.appendChild(videoStatus);
+                
+                // Apply visual indicator for disabled video
+                const localVideoWrapper = document.querySelector('.video-wrapper');
+                if (localVideoWrapper) {
+                    localVideoWrapper.classList.add('no-video');
+                    localVideoWrapper.setAttribute('data-username', this.username.substring(0, 1).toUpperCase());
+                }
+            } else {
+                // Remove visual indicator if video is enabled
+                const localVideoWrapper = document.querySelector('.video-wrapper');
+                if (localVideoWrapper) {
+                    localVideoWrapper.classList.remove('no-video');
+                }
+            }
+        }
+    }
+    
+    broadcastMediaStatus() {
+        if (!this.socket || !this.socket.connected) return;
+        
+        this.socket.emit('media_status_change', {
+            room_id: this.roomId,
+            user_id: this.userId,
+            audio_enabled: this.isAudioEnabled,
+            video_enabled: this.isVideoEnabled
+        });
+    }
+
+    updateRemoteMediaStatus(userId, audioEnabled, videoEnabled) {
+        const videoWrapper = document.getElementById(`video-${userId}`);
+        if (!videoWrapper) return;
+        
+        const statusContainer = videoWrapper.querySelector('.video-status');
+        if (statusContainer) {
+            // Clear previous status
+            statusContainer.innerHTML = '';
+            
+            // Add audio status if needed
+            if (!audioEnabled) {
+                const audioStatus = document.createElement('div');
+                audioStatus.className = 'video-status-icon video-muted';
+                statusContainer.appendChild(audioStatus);
+            }
+            
+            // Add video status if needed
+            if (!videoEnabled) {
+                const videoStatus = document.createElement('div');
+                videoStatus.className = 'video-status-icon video-off';
+                statusContainer.appendChild(videoStatus);
+                
+                // Visual indicator for disabled video
+                videoWrapper.classList.add('no-video');
+                
+                // Get first letter of username
+                const overlay = videoWrapper.querySelector('.video-overlay');
+                let username = 'U';
+                if (overlay) {
+                    username = overlay.textContent.trim().substring(0, 1).toUpperCase();
+                }
+                videoWrapper.setAttribute('data-username', username);
+            } else {
+                // Remove visual indicator if video is enabled
+                videoWrapper.classList.remove('no-video');
+            }
+        }
     }
 }
 

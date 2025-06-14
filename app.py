@@ -216,6 +216,61 @@ def get_active_rooms():
         rooms = [dict(row) for row in cursor.fetchall()]
         return jsonify(rooms)
 
+@app.route('/api/rooms/<room_id>/participants/count')
+def get_participant_count(room_id):
+    """Get count of active participants in a room"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT COUNT(*) as count
+            FROM room_participants
+            WHERE room_id = ? AND left_at IS NULL
+        ''', (room_id,))
+        
+        result = cursor.fetchone()
+        return jsonify({'count': result['count']})
+
+@app.route('/api/rooms/<room_id>/status')
+def get_room_status(room_id):
+    """Get room status and active participants"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        
+        # Get room details
+        cursor.execute('''
+            SELECT r.*, u.username as creator_name
+            FROM rooms r
+            JOIN users u ON r.created_by = u.id
+            WHERE r.id = ?
+        ''', (room_id,))
+        
+        room = cursor.fetchone()
+        
+        if not room:
+            return jsonify({'error': 'Room not found'}), 404
+            
+        # Get active participants count
+        cursor.execute('''
+            SELECT COUNT(*) as count
+            FROM room_participants
+            WHERE room_id = ? AND left_at IS NULL
+        ''', (room_id,))
+        
+        count = cursor.fetchone()['count']
+            
+        # Get participants
+        participants = get_room_participants(room_id)
+        
+        return jsonify({
+            'room_id': room['id'],
+            'room_name': room['name'],
+            'is_active': bool(room['is_active']),
+            'created_by': room['creator_name'],
+            'created_at': room['created_at'],
+            'active_participants_count': count,
+            'participants': participants
+        })
+
 # WebRTC Signaling through Socket.IO
 @socketio.on('connect')
 def on_connect():
@@ -227,6 +282,32 @@ def on_connect():
 def on_disconnect():
     """Handle client disconnection"""
     logger.info(f"Client disconnected: {request.sid}")
+    
+    # Check if user was in a room and handle disconnection
+    if 'room_id' in session and 'user_id' in session:
+        room_id = session.get('room_id')
+        user_id = session.get('user_id')
+        username = session.get('username')
+        
+        logger.info(f"Disconnected user {username} (ID: {user_id}) was in room {room_id}")
+        
+        # Update room_participants record
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    UPDATE room_participants 
+                    SET left_at = CURRENT_TIMESTAMP 
+                    WHERE room_id = ? AND user_id = ? AND left_at IS NULL
+                ''', (room_id, user_id))
+        except Exception as e:
+            logger.error(f"Error updating participant record on disconnect: {str(e)}")
+        
+        # Notify room about disconnection
+        emit('user_left', {
+            'username': username,
+            'user_id': user_id
+        }, room=room_id, include_self=False)
 
 @socketio.on('join_room')
 def on_join_room(data):
@@ -242,13 +323,29 @@ def on_join_room(data):
     logger.info(f"User {username} (ID: {user_id}) joining room {room_id}")
     join_room(room_id)
     
+    # Store in session
+    session['room_id'] = room_id
+    session['username'] = username
+    session['user_id'] = user_id
+    
     # Record participant joining
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
+            
+            # Check if this user is already in this room
             cursor.execute('''
-                INSERT INTO room_participants (room_id, user_id) VALUES (?, ?)
+                SELECT id FROM room_participants 
+                WHERE room_id = ? AND user_id = ? AND left_at IS NULL
             ''', (room_id, user_id))
+            
+            existing = cursor.fetchone()
+            
+            if not existing:
+                # Create new participant record
+                cursor.execute('''
+                    INSERT INTO room_participants (room_id, user_id) VALUES (?, ?)
+                ''', (room_id, user_id))
     except Exception as e:
         logger.error(f"Error recording participant: {str(e)}")
     
@@ -297,6 +394,9 @@ def on_leave_room(data):
         'username': username,
         'user_id': user_id
     }, room=room_id, include_self=False)
+    
+    # Remove room_id from session
+    session.pop('room_id', None)
 
 @socketio.on('webrtc_offer')
 def handle_offer(data):
@@ -308,12 +408,12 @@ def handle_offer(data):
     logger.info(f"Received offer from {from_user} to {target_user} in room {room_id}")
     
     if target_user and from_user and room_id:
-        # Send to entire room (each client will filter by target_user)
+        # Send to specific target user through the room
         emit('webrtc_offer', {
             'offer': data['offer'],
             'from_user': from_user,
             'target_user': target_user
-        }, broadcast=True, room=room_id)
+        }, room=room_id)
 
 @socketio.on('webrtc_answer')
 def handle_answer(data):
@@ -325,12 +425,12 @@ def handle_answer(data):
     logger.info(f"Received answer from {from_user} to {target_user} in room {room_id}")
     
     if target_user and from_user and room_id:
-        # Send to entire room (each client will filter by target_user)
+        # Send to specific target user through the room
         emit('webrtc_answer', {
             'answer': data['answer'],
             'from_user': from_user,
             'target_user': target_user
-        }, broadcast=True, room=room_id)
+        }, room=room_id)
 
 @socketio.on('webrtc_ice_candidate')
 def handle_ice_candidate(data):
@@ -342,12 +442,30 @@ def handle_ice_candidate(data):
     logger.info(f"Received ICE candidate from {from_user} to {target_user} in room {room_id}")
     
     if target_user and from_user and room_id:
-        # Send to entire room (each client will filter by target_user)
+        # Send to specific target user through the room
         emit('webrtc_ice_candidate', {
             'candidate': data['candidate'],
             'from_user': from_user,
             'target_user': target_user
-        }, broadcast=True, room=room_id)
+        }, room=room_id)
+
+@socketio.on('media_status_change')
+def handle_media_status(data):
+    """Handle media status change (audio/video toggle)"""
+    room_id = data.get('room_id')
+    user_id = data.get('user_id')
+    audio_enabled = data.get('audio_enabled')
+    video_enabled = data.get('video_enabled')
+    
+    logger.info(f"Media status change from user {user_id} in room {room_id}: audio={audio_enabled}, video={video_enabled}")
+    
+    if room_id and user_id is not None:
+        # Broadcast to others in the room
+        emit('media_status_change', {
+            'user_id': user_id,
+            'audio_enabled': audio_enabled,
+            'video_enabled': video_enabled
+        }, room=room_id, include_self=False)
 
 def get_room_participants(room_id):
     """Get list of current room participants"""
